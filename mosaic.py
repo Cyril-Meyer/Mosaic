@@ -1,5 +1,7 @@
 import sys
 import os
+import time
+import multiprocessing as mp
 import numpy as np
 from PIL import Image
 import skimage as ski
@@ -23,6 +25,18 @@ def metric_mse(x, y):
     return skimage.metrics.mean_squared_error(x, y)
 
 
+def metric_rmse(x, y):
+    return skimage.metrics.normalized_root_mse(x, y)
+
+
+def metric_ssim(x, y):
+    return 1-skimage.metrics.structural_similarity(x, y)
+
+
+def metric_ssim_rgb(x, y):
+    return 1-skimage.metrics.structural_similarity(x, y, multichannel=True)
+
+
 def get_mosaic(source_filename,
                output_filename,
                tiles_folder,
@@ -30,22 +44,35 @@ def get_mosaic(source_filename,
                tile_size=(64, 64),
                tile_max_usage=1,
                tile_max_number=float('inf'),
-               metric=metric_mse,
+               metric_name='mse',
                color_mode='RGB'):
-
     # ---------------------------------------------------------------------------------------------------------------- #
     # Arguments checks
     if not (destination_size[0] % tile_size[0] == 0 and destination_size[1] % tile_size[1] == 0):
         print("ERROR: destination size and tile size are not multiple")
         exit(1)
 
-    channels = 0
+    channels = None
     if color_mode == 'RGB':
         channels = 3
     elif color_mode == 'L':
         channels = 1
     else:
         print("ERROR: invalid color mode")
+        exit(1)
+
+    metric = None
+    if metric_name == 'mse':
+        metric = metric_mse
+    elif metric_name == 'rmse':
+        metric = metric_rmse
+    elif metric_name == 'ssim':
+        if channels == 1:
+            metric = metric_ssim
+        else:
+            metric = metric_ssim_rgb
+    else:
+        print("ERROR: invalid metric")
         exit(1)
 
     # ---------------------------------------------------------------------------------------------------------------- #
@@ -65,18 +92,21 @@ def get_mosaic(source_filename,
         print("ERROR: not enough tiles, tiles available :", len(tiles_files) * tile_max_usage)
         exit(1)
     print("tiles available :", len(tiles_files))
-    print("tiles with usage :", len(tiles_files) * tile_max_usage)
+    print("tiles used :", len(tiles_files) * tile_max_usage)
 
     if len(tiles_files) > tile_max_number:
+        tile_max_number = max(tile_max_number, x_tiles * y_tiles)
         tiles_files = tiles_files[0:tile_max_number]
         print("tiles selected :", len(tiles_files))
 
-    tileset = np.zeros(((len(tiles_files),) + tile_size + (channels,)), dtype=np.uint8)
+    if channels > 1:
+        tileset = np.zeros(((len(tiles_files),) + tile_size + (channels,)), dtype=np.uint8)
+    else:
+        tileset = np.zeros(((len(tiles_files),) + tile_size), dtype=np.uint8)
     tileset_usage = np.full(len(tiles_files), tile_max_usage)
-    progress_status = Progress(len(tiles_files))
+
     for f in range(len(tiles_files)):
         tileset[f] = np.array(Image.open(os.path.join(tiles_folder, tiles_files[f])).resize(tile_size).convert(color_mode))
-        progress_status.update()
 
     destination = np.array(destination)
     print("working destination array shape :", destination.shape, destination.dtype)
@@ -113,20 +143,22 @@ def get_mosaic(source_filename,
         for p in batch:
             patch = destination[p[0]*tile_size[0]:(p[0]+1)*tile_size[0], p[1]*tile_size[1]:(p[1]+1)*tile_size[1]]
 
+            # ---------- THIS PART SHOULD BE MULTI-PROCESSED - BEGIN ---------- #
             best = float('inf')
-            bestid = -1
-
-            for tileid in range(tileset.shape[0]):
-                score = metric(patch, tileset[tileid])
+            best_id = -1
+            
+            for tile_id in range(tileset.shape[0]):
+                score = metric(patch, tileset[tile_id])
                 if score < best:
                     best = score
-                    bestid = tileid
+                    best_id = tile_id
+            # ---------- THIS PART SHOULD BE MULTI-PROCESSED - END ------------ #
 
-            destination[p[0] * tile_size[0]:(p[0] + 1) * tile_size[0], p[1] * tile_size[1]:(p[1] + 1) * tile_size[1]] = tileset[bestid]
-            tileset_usage[bestid] = tileset_usage[bestid]-1
-            if tileset_usage[bestid] == 0:
-                tileset = np.delete(tileset, bestid, 0)
-                tileset_usage = np.delete(tileset_usage, bestid, 0)
+            destination[p[0] * tile_size[0]:(p[0] + 1) * tile_size[0], p[1] * tile_size[1]:(p[1] + 1) * tile_size[1]] = tileset[best_id]
+            tileset_usage[best_id] = tileset_usage[best_id]-1
+            if tileset_usage[best_id] == 0:
+                tileset = np.delete(tileset, best_id, 0)
+                tileset_usage = np.delete(tileset_usage, best_id, 0)
 
             progress_status.update()
     print()
@@ -139,12 +171,21 @@ def get_mosaic(source_filename,
 
 
 get_mosaic("source.png",
-           "destination.png",
+           "destination_4096_64_mse_NB.png",
            "../out_200k",
            destination_size=(4096, 4096),
-           tile_size=(32, 32),
+           tile_size=(64, 64),
            tile_max_usage=1,
-           tile_max_number=float('inf'),
-           metric=metric_mse,
-           color_mode='RGB')
+           tile_max_number=float("inf"),
+           metric_name='mse',
+           color_mode='L')
 
+get_mosaic("source.png",
+           "destination_4096_64_mse_RGB.png",
+           "../out_200k",
+           destination_size=(4096, 4096),
+           tile_size=(64, 64),
+           tile_max_usage=1,
+           tile_max_number=float("inf"),
+           metric_name='mse',
+           color_mode='RGB')
